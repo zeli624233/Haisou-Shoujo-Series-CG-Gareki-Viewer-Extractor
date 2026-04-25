@@ -85,4 +85,20 @@ HaisouShoujoViewerExtractor.exe
 # 感谢：
 该项目的解包离不开Chenx221大佬（ https://github.com/Chenx221 ）的EscudeTools工具( https://github.com/Chenx221/EscudeTools ),解包该游戏十分好用，感谢大佬的开源！。
 
+<!-- 右栏：新增侧边栏 -->
+   <div style="flex: 3; min-width: 240px;">
+     ## 📋 项目信息
+     - 许可证：MIT License
+     - 构建脚本：
+       - `build_windows.bat`
+       - `build_windows_release.bat`
+       - `build_linux.sh`
+     - 运行脚本：`run_windows.bat`
+     - 主程序：`main.py`
+     ## 📎 快速链接
+     - [使用说明](使用说明1.png)
+     - [Issues](../../issues)
+   </div>
+ </div>
+
 
