@@ -3,8 +3,8 @@ chcp 65001 >nul
 setlocal
 cd /d "%~dp0"
 
-set APP_NAME=HaisouShoujoViewerExtractor
-set RELEASE_NAME=HaisouShoujoViewerExtractor_Ver1.0_Windows
+set APP_NAME=HaisonShoujoViewerExtractor
+set RELEASE_NAME=HaisonShoujoViewerExtractor_Ver1.0_Windows
 
 echo [1/6] Checking Python...
 python --version || goto :error
@@ -27,7 +27,7 @@ if exist release rmdir /s /q release
 mkdir release
 
 echo [5/6] Building Windows EXE with PyInstaller...
-python -m PyInstaller HaisouShoujoViewerExtractor.spec --clean --noconfirm || goto :error
+python -m PyInstaller HaisonShoujoViewerExtractor.spec --clean --noconfirm || goto :error
 
 echo [6/6] Packaging release folder...
 copy README.md dist\%APP_NAME%\README.md >nul
