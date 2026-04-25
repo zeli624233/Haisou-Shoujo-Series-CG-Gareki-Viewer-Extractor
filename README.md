@@ -1,4 +1,4 @@
-# Haisou Shoujo Series CG & Gareki Viewer & Extractor Ver1.0
+# Haisou Shoujo Series CG & Gareki Viewer & Extractor
 ## 简介
 
 这是一个用于《廃村少女》系列 CG/差分资源查看与导出的工具，支持读取 LSF 与 PNG 资源，组合预览并导出当前组合或批量导出组合图。
