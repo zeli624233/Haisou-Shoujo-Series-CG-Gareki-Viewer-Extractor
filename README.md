@@ -67,7 +67,7 @@ build_windows.bat
 生成结果位于：
 
 ```text
-dist/HaisouShoujoViewerExtractor/
+dist/HaisonShoujoViewerExtractor/
 ```
 
 其中主程序为：
