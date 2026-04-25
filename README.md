@@ -1,5 +1,5 @@
 # Haisou-Shoujo-Series-CG-Gareki-Viewer-Extractor
-# 廃村少女系列—CG与立绘——查看合成工具 
+# 廃村少女系列—CG与立绘查看合成工具 
 # 目前支持：
 ## 廃村少女 ～妖し惑ひの籠の郷～
 ## 廃村少女 外伝 ～嬌絡夢現～
