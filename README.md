@@ -1,5 +1,4 @@
-# Haison Shoujo Series CG & Gareki Viewer & Extractor
- 
+
  ![image](https://github.com/zeli624233/Haison-Shoujo-Series-CG-Gareki-Viewer-Extractor/blob/main/Logo.png)
 ## 简介
 
