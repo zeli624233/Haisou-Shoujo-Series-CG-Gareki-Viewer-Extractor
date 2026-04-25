@@ -82,10 +82,6 @@ dist/HaisonShoujoViewerExtractor/
 HaisonShoujoViewerExtractor.exe
 ```
 
-### 方法二：GitHub Actions 自动打包
-
-把源码提交到 GitHub 后，进入仓库的 **Actions** 页面，运行 `Build Windows EXE` 工作流，完成后可在 Actions Artifacts 中下载 Windows 版程序包。
-
 ## 许可证
 
 本项目使用 MIT License。详见 [LICENSE](LICENSE)。
