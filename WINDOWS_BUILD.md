@@ -10,8 +10,8 @@
 4. 打包完成后查看：
 
 ```text
-release/HaisonShoujoViewerExtractor_Ver1.0_Windows/HaisonShoujoViewerExtractor.exe
-release/HaisonShoujoViewerExtractor_Ver1.0_Windows.zip
+release/HaisouShoujoViewerExtractor_Ver1.0_Windows/HaisouShoujoViewerExtractor.exe
+release/HaisouShoujoViewerExtractor_Ver1.0_Windows.zip
 ```
 
 ## GitHub Actions 打包
@@ -19,4 +19,4 @@ release/HaisonShoujoViewerExtractor_Ver1.0_Windows.zip
 1. 把源码提交到 GitHub。
 2. 打开仓库 Actions。
 3. 运行 `Build Windows EXE`。
-4. 在 Artifacts 下载 `HaisonShoujoViewerExtractor_Ver1.0_Windows.zip`。
+4. 在 Artifacts 下载 `HaisouShoujoViewerExtractor_Ver1.0_Windows.zip`。

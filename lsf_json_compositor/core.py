@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import re
 import struct
-from collections import defaultdict
+import threading
+import time
+from collections import OrderedDict, defaultdict
 from dataclasses import dataclass, field
-from functools import lru_cache
 from pathlib import Path
 from typing import Any, Optional
 
@@ -381,12 +383,22 @@ def parse_json_project(path: str | Path) -> JSONProject:
 
 
 class PNGResolver:
-    def __init__(self, png_dir: str | Path):
+    # 预览时只缓存最近使用的少量 PNG。旧版使用装饰在类方法上的
+    # lru_cache(maxsize=4096)，缓存会跨 PNGResolver 实例保留：用户切换目录后，
+    # 上一个目录加载过的图片仍被全局缓存引用，导致内存持续增长。
+    # 现在改为每个 PNGResolver 实例独立的、可分批释放的 LRU 缓存。GUI 切换目录后，
+    # 会先完成新目录加载，再把旧目录缓存丢给后台线程慢慢清理，避免加载新目录时卡顿。
+    DEFAULT_IMAGE_CACHE_SIZE = 128
+
+    def __init__(self, png_dir: str | Path, image_cache_size: int = DEFAULT_IMAGE_CACHE_SIZE):
         self.png_dir = Path(png_dir).expanduser().resolve()
         if not self.png_dir.exists():
             raise ProjectError("PNG 目录不存在。")
         self.by_stem: dict[str, Path] = {}
         self.by_suffix: dict[str, Path] = {}
+        self._image_cache_size = max(1, int(image_cache_size))
+        self._image_cache: OrderedDict[str, Image.Image] = OrderedDict()
+        self._image_cache_lock = threading.RLock()
         self._build_index()
 
     def _build_index(self) -> None:
@@ -411,10 +423,54 @@ class PNGResolver:
                 return self.by_stem[c]
         return self.by_suffix.get(str(layer_id))
 
-    @lru_cache(maxsize=4096)
-    def load_rgba(self, path_str: str) -> Image.Image:
-        return Image.open(path_str).convert("RGBA")
+    def _load_rgba_uncached(self, path_str: str) -> Image.Image:
+        # 使用 with 立即关闭文件句柄，只把 convert 后的 RGBA 图像交给缓存。
+        with Image.open(path_str) as img:
+            return img.convert("RGBA")
 
+    def load_rgba(self, path_str: str) -> Image.Image:
+        key = str(path_str)
+        with self._image_cache_lock:
+            cached = self._image_cache.get(key)
+            if cached is not None:
+                self._image_cache.move_to_end(key)
+                return cached
+
+        image = self._load_rgba_uncached(key)
+
+        with self._image_cache_lock:
+            # 其他线程可能刚刚加载了同一张图，优先复用已有对象。
+            cached = self._image_cache.get(key)
+            if cached is not None:
+                self._image_cache.move_to_end(key)
+                return cached
+            self._image_cache[key] = image
+            self._image_cache.move_to_end(key)
+            while len(self._image_cache) > self._image_cache_size:
+                self._image_cache.popitem(last=False)
+        return image
+
+    def clear_cache(self) -> None:
+        with self._image_cache_lock:
+            self._image_cache.clear()
+
+    def clear_cache_gradually(self, batch_size: int = 8, delay_seconds: float = 0.02) -> None:
+        """分批释放缓存，给后台清理线程使用，避免一次性释放大量图片造成前台卡顿。"""
+        batch_size = max(1, int(batch_size))
+        delay_seconds = max(0.0, float(delay_seconds))
+        while True:
+            victims: list[tuple[str, Image.Image]] = []
+            with self._image_cache_lock:
+                for _ in range(batch_size):
+                    if not self._image_cache:
+                        break
+                    victims.append(self._image_cache.popitem(last=False))
+            if not victims:
+                break
+            # 离开锁后再释放 Image 对象，避免阻塞正在使用同一 resolver 的操作。
+            victims.clear()
+            if delay_seconds:
+                time.sleep(delay_seconds)
 
 def _record_group_by_tag(records: list[LSFRecord]) -> dict[int, dict[int, list[LSFRecord]]]:
     slots: dict[int, dict[int, list[LSFRecord]]] = defaultdict(lambda: defaultdict(list))
@@ -1646,6 +1702,30 @@ def analyze_lsf_scene(project: LSFProject) -> LSFScene:
 
 
 
+
+def _normalize_runtime_worker_count(value: int | None, item_count: int) -> int:
+    """预览/运行时合成用的工作线程数。只并行 PNG 解码读取，最终叠图仍保持原顺序。"""
+    if item_count <= 1:
+        return 1
+    try:
+        workers = int(value or 1)
+    except Exception:
+        workers = 1
+    return max(1, min(workers, item_count))
+
+
+def _load_rgba_paths_parallel(
+    resolver: PNGResolver,
+    paths: list[Path],
+    runtime_workers: int | None = 1,
+) -> list[Image.Image]:
+    """按 paths 顺序返回 RGBA 图片；读取/解码阶段可使用多个 CPU 线程。"""
+    workers = _normalize_runtime_worker_count(runtime_workers, len(paths))
+    if workers <= 1:
+        return [resolver.load_rgba(str(path)) for path in paths]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers, thread_name_prefix="preview-png") as executor:
+        return list(executor.map(lambda p: resolver.load_rgba(str(p)), paths))
+
 def compose_lsf_scene(
     scene: LSFScene,
     resolver: PNGResolver,
@@ -1654,6 +1734,7 @@ def compose_lsf_scene(
     blush_options: list[Optional[LSFOption]] | None,
     holy_option: Optional[LSFOption] = None,
     special_options: list[Optional[LSFOption]] | None = None,
+    runtime_workers: int | None = 1,
 ) -> tuple[Image.Image, list[str], list[LSFRecord]]:
     selected_records: list[LSFRecord] = []
     selected_records.extend(scene.fixed_records)
@@ -1686,12 +1767,20 @@ def compose_lsf_scene(
 
     canvas = Image.new("RGBA", (scene.project.canvas_width, scene.project.canvas_height), (0, 0, 0, 0))
     warnings: list[str] = []
+    drawable_records: list[LSFRecord] = []
+    drawable_paths: list[Path] = []
     for rec in selected_records:
         img_path = resolver.find_for_lsf(rec.name)
         if not img_path:
             warnings.append(f"缺少 PNG: {rec.name}.png")
             continue
-        img = resolver.load_rgba(str(img_path))
+        drawable_records.append(rec)
+        drawable_paths.append(img_path)
+
+    # 运行时预览合成：PNG 读取/解码阶段并行使用 CPU 线程；
+    # alpha_composite 仍按原图层顺序执行，避免图层前后关系错乱。
+    drawable_images = _load_rgba_paths_parallel(resolver, drawable_paths, runtime_workers)
+    for rec, img in zip(drawable_records, drawable_images):
         canvas.alpha_composite(img, (rec.left, rec.top))
     return canvas, warnings, selected_records
 
@@ -1749,6 +1838,7 @@ def compose_json_scene(
     body_option: Optional[LSFOption],
     expression_option: Optional[LSFOption],
     blush_option: Optional[LSFOption],
+    runtime_workers: int | None = 1,
 ) -> tuple[Image.Image, list[str], list[JSONLayer]]:
     canvas = Image.new("RGBA", (scene.project.canvas_width, scene.project.canvas_height), (0, 0, 0, 0))
     warnings: list[str] = []
@@ -1761,11 +1851,17 @@ def compose_json_scene(
         layers.extend(blush_option.records)  # type: ignore[arg-type]
     layers = sorted({(x.layer_id, x.draw_index): x for x in layers}.values(), key=lambda x: x.draw_index)
 
+    drawable_layers: list[JSONLayer] = []
+    drawable_paths: list[Path] = []
     for layer in layers:
         path = resolver.find_for_json_layer(scene.project.stem, layer.layer_id)
         if not path:
             warnings.append(f"缺少 PNG: layer_id={layer.layer_id}")
             continue
-        img = resolver.load_rgba(str(path))
+        drawable_layers.append(layer)
+        drawable_paths.append(path)
+
+    drawable_images = _load_rgba_paths_parallel(resolver, drawable_paths, runtime_workers)
+    for layer, img in zip(drawable_layers, drawable_images):
         canvas.alpha_composite(img, (layer.left, layer.top))
     return canvas, warnings, layers

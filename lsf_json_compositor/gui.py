@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import concurrent.futures
 import itertools
+import json
+import os
+import platform
 import queue
 import re
+import subprocess
 import threading
 import time
 import tkinter as tk
@@ -106,8 +110,167 @@ def make_unique_png_path(folder: Path, stem: str) -> Path:
     return folder / f"{base}_extra.png"
 
 
-THREAD_COUNT_CHOICES = ("2", "4", "6", "8", "12", "16")
-DEFAULT_THREAD_COUNT = "4"
+def detect_cpu_counts() -> tuple[int, int]:
+    """尽量识别用户电脑的物理核心数和逻辑线程数。"""
+    logical_threads = max(1, int(os.cpu_count() or 4))
+    physical_cores: int | None = None
+
+    # 如果用户环境装了 psutil，就优先用 psutil；没有也不强制依赖。
+    try:
+        import psutil  # type: ignore
+        psutil_logical = psutil.cpu_count(logical=True)
+        psutil_physical = psutil.cpu_count(logical=False)
+        if psutil_logical:
+            logical_threads = max(1, int(psutil_logical))
+        if psutil_physical:
+            physical_cores = max(1, int(psutil_physical))
+    except Exception:
+        pass
+
+    # Windows 打包版通常没有 psutil，尝试用系统自带 CIM 读取核心/线程数。
+    if physical_cores is None and platform.system().lower() == "windows":
+        try:
+            startupinfo = None
+            creationflags = 0
+            if hasattr(subprocess, "STARTUPINFO"):
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= getattr(subprocess, "STARTF_USESHOWWINDOW", 0)
+            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            cmd = [
+                "powershell",
+                "-NoProfile",
+                "-ExecutionPolicy", "Bypass",
+                "-Command",
+                "(Get-CimInstance Win32_Processor | Measure-Object -Property NumberOfCores -Sum).Sum; "
+                "(Get-CimInstance Win32_Processor | Measure-Object -Property NumberOfLogicalProcessors -Sum).Sum",
+            ]
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=2,
+                startupinfo=startupinfo,
+                creationflags=creationflags,
+            )
+            nums = []
+            for line in (result.stdout or "").splitlines():
+                line = line.strip()
+                if line:
+                    try:
+                        nums.append(int(float(line)))
+                    except Exception:
+                        pass
+            if len(nums) >= 1 and nums[0] > 0:
+                physical_cores = nums[0]
+            if len(nums) >= 2 and nums[1] > 0:
+                logical_threads = nums[1]
+        except Exception:
+            pass
+
+    if physical_cores is None:
+        # 无法可靠识别物理核心时，用逻辑线程数兜底，避免显示 0。
+        physical_cores = logical_threads
+    return max(1, physical_cores), max(1, logical_threads)
+
+
+CPU_PHYSICAL_CORES, CPU_LOGICAL_THREADS = detect_cpu_counts()
+CPU_INFO_TEXT = f"检测到 CPU：物理核心 {CPU_PHYSICAL_CORES} 个 / 逻辑线程 {CPU_LOGICAL_THREADS} 个"
+DEFAULT_THREAD_COUNT = str(CPU_LOGICAL_THREADS)
+
+
+DEFAULT_AUTOMATION_SETTINGS: dict[str, object] = {
+    "has_run": False,
+    "interval_seconds": 0.8,
+    "start_from_current": False,
+    "auto_pick_next_dir": False,
+    "apply_linkage": True,
+}
+
+
+def _settings_path() -> Path:
+    """返回用户本机的配置文件路径；打包成 exe 后也可用。"""
+    base = os.environ.get("APPDATA")
+    if base:
+        root = Path(base) / "HaisonShoujoViewerExtractor"
+    else:
+        root = Path.home() / ".HaisonShoujoViewerExtractor"
+    return root / "settings.json"
+
+
+def load_app_settings() -> dict:
+    path = _settings_path()
+    try:
+        if path.is_file():
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return data
+    except Exception:
+        pass
+    return {}
+
+
+def save_app_settings(settings: dict) -> None:
+    path = _settings_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(settings, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        # 设置保存失败不影响主功能。
+        pass
+
+
+def load_automation_settings() -> dict[str, object]:
+    settings = load_app_settings()
+    saved = settings.get("automation_test", {}) if isinstance(settings, dict) else {}
+    result = dict(DEFAULT_AUTOMATION_SETTINGS)
+    if isinstance(saved, dict):
+        result.update(saved)
+    return result
+
+
+def save_automation_settings(auto_settings: dict[str, object]) -> None:
+    settings = load_app_settings()
+    if not isinstance(settings, dict):
+        settings = {}
+    current = dict(DEFAULT_AUTOMATION_SETTINGS)
+    current.update(auto_settings)
+    settings["automation_test"] = current
+    save_app_settings(settings)
+
+
+def build_thread_count_choices() -> tuple[str, ...]:
+    candidates = {
+        1,
+        2,
+        4,
+        6,
+        8,
+        12,
+        16,
+        24,
+        32,
+        48,
+        64,
+        96,
+        128,
+        CPU_PHYSICAL_CORES,
+        CPU_LOGICAL_THREADS,
+    }
+    values = sorted(x for x in candidates if 1 <= int(x) <= CPU_LOGICAL_THREADS)
+    if CPU_LOGICAL_THREADS not in values:
+        values.append(CPU_LOGICAL_THREADS)
+    return tuple(str(x) for x in values)
+
+
+THREAD_COUNT_CHOICES = build_thread_count_choices()
+
+
+def normalize_thread_count(value) -> int:
+    try:
+        requested = int(value)
+    except Exception:
+        requested = CPU_LOGICAL_THREADS
+    return max(1, min(requested, CPU_LOGICAL_THREADS))
 
 
 def make_unique_png_path_reserved(folder: Path, stem: str, reserved_paths: set[str]) -> Path:
@@ -167,6 +330,7 @@ class PreviewCanvas(ttk.Frame):
     def _refresh(self) -> None:
         self.canvas.delete("all")
         if self._last_image is None:
+            self._photo = None
             self.resolution_var.set("当前预览分辨率：- x -")
             return
         cw = max(100, self.canvas.winfo_width())
@@ -342,6 +506,56 @@ class BaseTab(ttk.Frame):
         bar.pack(fill="x", padx=8, pady=(2, 8), anchor="w")
         return bar
 
+    def _detach_loaded_resources(self) -> dict[str, object | None]:
+        """把当前目录资源从前台状态中摘下来，但先不在主线程释放。"""
+        old_resources: dict[str, object | None] = {
+            "resolver": getattr(self, "resolver", None),
+            "scene": getattr(self, "scene", None),
+            "current_image": getattr(self, "current_image", None),
+        }
+        if hasattr(self, "resolver"):
+            self.resolver = None
+        if hasattr(self, "scene"):
+            self.scene = None
+        if hasattr(self, "current_image"):
+            self.current_image = None
+        return old_resources
+
+    def _schedule_background_resource_cleanup(self, resources: dict[str, object | None], delay_ms: int = 300) -> None:
+        """等新目录完成加载后，再把旧目录缓存交给后台线程分批释放。"""
+        if not resources or not any(value is not None for value in resources.values()):
+            return
+
+        def start_worker() -> None:
+            def worker() -> None:
+                old_resolver = resources.pop("resolver", None)
+                old_scene = resources.pop("scene", None)
+                old_image = resources.pop("current_image", None)
+                try:
+                    if old_resolver is not None:
+                        clear_gradually = getattr(old_resolver, "clear_cache_gradually", None)
+                        if callable(clear_gradually):
+                            clear_gradually(batch_size=8, delay_seconds=0.02)
+                        else:
+                            clear_cache = getattr(old_resolver, "clear_cache", None)
+                            if callable(clear_cache):
+                                clear_cache()
+                except Exception:
+                    pass
+                finally:
+                    # 这些对象只在后台线程中最后释放，避免切换目录时主线程一次性析构大量图片。
+                    old_resolver = None
+                    old_scene = None
+                    old_image = None
+                    resources.clear()
+
+            threading.Thread(target=worker, daemon=True, name="old-directory-cache-cleanup").start()
+
+        try:
+            self.after(max(0, int(delay_ms)), start_worker)
+        except Exception:
+            start_worker()
+
 
 
 class LSFTab(BaseTab):
@@ -358,6 +572,7 @@ class LSFTab(BaseTab):
         self.body_var = tk.StringVar()
         self.linkage_vars: dict[str, tk.BooleanVar] = {}
         self.linkage_summary_var = tk.StringVar(value="联动：未开启")
+        self.automation_settings = load_automation_settings()
         self.expression_vars: list[tk.StringVar] = []
         self.blush_vars: list[tk.StringVar] = []
         self.special_vars: list[tk.StringVar] = []
@@ -391,7 +606,11 @@ class LSFTab(BaseTab):
 
         options = ttk.LabelFrame(self.left, text="组合选项")
         options.pack(fill="x")
-        ttk.Label(options, text="人物或者场景").pack(anchor="w", padx=8, pady=(8, 2))
+        scene_header = ttk.Frame(options)
+        scene_header.pack(fill="x", padx=8, pady=(8, 2))
+        ttk.Label(scene_header, text="人物或者场景").pack(side="left")
+        ttk.Button(scene_header, text="软件自动化测试", command=self.open_automation_test_dialog).pack(side="right")
+        ttk.Button(scene_header, text="开始测试", command=self.quick_start_automation_test).pack(side="right", padx=(0, 6))
         self.scene_combo = ttk.Combobox(options, textvariable=self.scene_var, state="readonly", width=48)
         self.scene_combo.pack(fill="x", padx=8)
         self.scene_combo.bind("<<ComboboxSelected>>", lambda e: self._load_selected_scene())
@@ -572,10 +791,47 @@ class LSFTab(BaseTab):
         ttk.Button(btns, text="关闭", command=win.destroy).pack(side="right")
         self._place_popup_like_left_panel(win)
 
-    def _on_body_selected(self) -> None:
+    def _advance_enabled_linkage_controls(self) -> int:
+        """按当前“联动设置”推进已勾选的表情/红晕/特殊/圣光选项。"""
+        changed = 0
         for key, _label, combo, var in self._iter_link_targets():
             if self._get_linkage_var(key).get() and self._combo_has_real_options(combo):
-                self._advance_combobox(combo, var, skip_none_choices=True)
+                if self._advance_combobox(combo, var, skip_none_choices=True):
+                    changed += 1
+        return changed
+
+    def _enabled_linkage_labels(self) -> list[str]:
+        labels: list[str] = []
+        for key, label, combo, _var in self._iter_link_targets():
+            if self._get_linkage_var(key).get() and self._combo_has_real_options(combo):
+                labels.append(label)
+        return labels
+
+    def _automation_linkage_step_count_for_scene(self, scene: LSFScene) -> int:
+        """自动化测试启用联动时，每个 LSF 至少循环到能覆盖已勾选联动项一轮。"""
+        max_count = 1
+        for i, (_name, options) in enumerate(scene.expression_groups, start=1):
+            key = f"expression_{i}"
+            if self._get_linkage_var(key).get():
+                values = self._values_from_labels([x.label for x in options], real_only=True)
+                max_count = max(max_count, len(values))
+        for i, (_name, options) in enumerate(scene.blush_groups, start=1):
+            key = f"blush_{i}"
+            if self._get_linkage_var(key).get():
+                values = self._values_from_labels([x.label for x in options], real_only=True)
+                max_count = max(max_count, len(values))
+        for i, (_name, options) in enumerate(scene.special_groups, start=1):
+            key = f"special_{i}"
+            if self._get_linkage_var(key).get():
+                values = self._values_from_labels([x.label for x in options], real_only=True)
+                max_count = max(max_count, len(values))
+        if self._get_linkage_var("holy").get():
+            values = self._values_from_labels([x.label for x in scene.holy_options], real_only=True)
+            max_count = max(max_count, len(values))
+        return max(1, max_count)
+
+    def _on_body_selected(self) -> None:
+        self._advance_enabled_linkage_controls()
         self.refresh_preview()
 
     def _pick_lsf_dir(self) -> None:
@@ -594,7 +850,17 @@ class LSFTab(BaseTab):
         png_count = count_dir_files(self.png_var.get(), ("*.png",))
         self.stats_var.set(f"当前目录统计：LSF {lsf_count} 个，PNG {png_count} 个")
 
+    def _clear_current_preview_image(self) -> None:
+        self.current_image = None
+        if hasattr(self, "preview"):
+            self.preview.show_image(None)
+
+    def _release_loaded_resources(self) -> dict[str, object | None]:
+        # 切换目录时只把旧资源从前台摘下，不在主线程立即清理。
+        return self._detach_loaded_resources()
+
     def load_project(self) -> None:
+        old_resources = self._release_loaded_resources()
         try:
             self.lsf_files = collect_input_files(self.lsf_input_var.get(), ("*.lsf",))
             if not self.lsf_files:
@@ -609,7 +875,9 @@ class LSFTab(BaseTab):
             self.scene_combo["values"] = scene_names
             self.scene_var.set(scene_names[0])
             self._load_selected_scene()
+            self._schedule_background_resource_cleanup(old_resources)
         except Exception as exc:
+            self._schedule_background_resource_cleanup(old_resources)
             messagebox.showerror("加载失败", str(exc))
 
     def _has_real_body_options(self) -> bool:
@@ -650,7 +918,7 @@ class LSFTab(BaseTab):
             var.set(none_label)
             combo.state(["disabled"])
 
-    def _load_selected_scene(self) -> None:
+    def _load_selected_scene(self, refresh: bool = True) -> None:
         try:
             selected = self.scene_var.get().strip()
             if not selected:
@@ -658,6 +926,7 @@ class LSFTab(BaseTab):
             path = next((p for p in self.lsf_files if p.name == selected), None)
             if not path:
                 return
+            self._clear_current_preview_image()
             self.scene = analyze_lsf_scene(parse_lsf_file(path))
             self.body_combo["values"] = [x.label for x in self.scene.body_options]
             if len(self.scene.body_options) > 1 and self.scene.body_options[0].key == "__none__":
@@ -675,7 +944,8 @@ class LSFTab(BaseTab):
             else:
                 self.holy_combo.state(["!disabled", "readonly"])
             self._update_linkage_summary()
-            self.refresh_preview()
+            if refresh:
+                self.refresh_preview()
         except Exception as exc:
             messagebox.showerror("读取 LSF 失败", str(exc))
 
@@ -713,6 +983,7 @@ class LSFTab(BaseTab):
             blushes,
             None if holy and holy.key == "__none__" else holy,
             specials,
+            runtime_workers=CPU_LOGICAL_THREADS,
         )
         self.current_image = image
         self.preview.show_image(image)
@@ -722,6 +993,9 @@ class LSFTab(BaseTab):
             f"画布: {self.scene.project.canvas_width} x {self.scene.project.canvas_height}",
             f"已加载 LSF 数: {len(self.lsf_files)}",
             f"已索引 PNG 数: {len(self.resolver.by_stem) if self.resolver else 0}",
+            CPU_INFO_TEXT,
+            f"当前默认工作线程: {DEFAULT_THREAD_COUNT}",
+            f"运行时预览 PNG 解码线程: {CPU_LOGICAL_THREADS}",
             f"衣服或者其他时间端: {body.label if body else '(无)'}",
         ]
         for i, expr in enumerate(exprs, start=1):
@@ -989,7 +1263,7 @@ class LSFTab(BaseTab):
         if not jobs:
             return 0, 0
 
-        max_workers = max(1, min(int(thread_count or 4), 16))
+        max_workers = normalize_thread_count(thread_count)
         filename_lock = threading.Lock()
         reserved_paths: set[str] = set()
         completed = 0
@@ -1172,7 +1446,7 @@ class LSFTab(BaseTab):
             width=6,
         )
         thread_combo.pack(side="left", padx=(8, 8))
-        ttk.Label(thread_row, text="默认 4；可选 2 / 4 / 6 / 8 / 12 / 16").pack(side="left")
+        ttk.Label(thread_row, text=f"{CPU_INFO_TEXT}；默认使用全部逻辑线程").pack(side="left")
 
         target_frame = ttk.LabelFrame(win, text="参与批量的选项")
         target_frame.pack(fill="both", expand=True, padx=12, pady=(0, 8))
@@ -1330,6 +1604,307 @@ class LSFTab(BaseTab):
         close_button = ttk.Button(btns2, text="关闭", command=win.destroy)
         close_button.pack(side="right")
         self._place_popup_like_left_panel(win)
+
+
+    def quick_start_automation_test(self) -> None:
+        self.automation_settings = load_automation_settings()
+        if not bool(self.automation_settings.get("has_run", False)):
+            messagebox.showinfo("提示", "先进行一次软件自动化测试先。")
+            return
+        self.open_automation_test_dialog(auto_start=True)
+
+    def open_automation_test_dialog(self, auto_start: bool = False) -> None:
+        if not self.lsf_files or not list(self.scene_combo["values"] or []):
+            messagebox.showinfo("提示", "请先加载 LSF 项目。")
+            return
+
+        win = tk.Toplevel(self)
+        win.title("软件自动化测试")
+        win.transient(self.winfo_toplevel())
+        win.resizable(False, False)
+
+        self.automation_settings = load_automation_settings()
+        interval_var = tk.StringVar(value=str(self.automation_settings.get("interval_seconds", 0.8)))
+        start_from_current_var = tk.BooleanVar(value=bool(self.automation_settings.get("start_from_current", False)))
+        auto_pick_next_dir_var = tk.BooleanVar(value=bool(self.automation_settings.get("auto_pick_next_dir", False)))
+        apply_linkage_var = tk.BooleanVar(value=bool(self.automation_settings.get("apply_linkage", True)))
+        progress_var = tk.DoubleVar(value=0.0)
+        status_var = tk.StringVar(value=f"待开始｜{CPU_INFO_TEXT}")
+
+        state = {
+            "running": False,
+            "sequence": [],
+            "index": 0,
+            "start_time": 0.0,
+            "after_id": None,
+            "last_scene": "",
+            "last_body": "",
+        }
+
+        ttk.Label(
+            win,
+            text="自动测试顺序：先加载第 1 个“人物或者场景”，再把“衣服或者其他时间端”从第 1 项切到最后 1 项；然后加载第 2 个“人物或者场景”继续测试。勾选“应用联动”后，会按当前联动设置同步切换表情/红晕/特殊/圣光；如果联动项数量更多，会循环衣服选项直到联动项也走完一轮。",
+            wraplength=500,
+            justify="left",
+        ).pack(fill="x", padx=12, pady=(12, 8))
+
+        setting_frame = ttk.LabelFrame(win, text="测试设置")
+        setting_frame.pack(fill="x", padx=12, pady=(0, 8))
+
+        row1 = ttk.Frame(setting_frame)
+        row1.pack(fill="x", padx=8, pady=(8, 4))
+        ttk.Label(row1, text="每次切换间隔（秒）").pack(side="left")
+        ttk.Entry(row1, textvariable=interval_var, width=10).pack(side="left", padx=(8, 0))
+        ttk.Label(row1, text="建议 0.3 - 2 秒；设太低会更吃 CPU").pack(side="left", padx=(8, 0))
+
+        ttk.Checkbutton(
+            setting_frame,
+            text="从当前选中的人物/衣服开始测试（不勾选则从第一个人物、第一个衣服开始）",
+            variable=start_from_current_var,
+        ).pack(anchor="w", padx=8, pady=(2, 2))
+        ttk.Checkbutton(
+            setting_frame,
+            text="应用当前“联动”设置（自动切换表情 / 红晕 / 特殊 / 圣光）",
+            variable=apply_linkage_var,
+        ).pack(anchor="w", padx=8, pady=(2, 2))
+        ttk.Checkbutton(
+            setting_frame,
+            text="测试到最后一个选项后，自动打开 LSF 目录选择窗口",
+            variable=auto_pick_next_dir_var,
+        ).pack(anchor="w", padx=8, pady=(2, 8))
+
+        progress_frame = ttk.LabelFrame(win, text="测试进度")
+        progress_frame.pack(fill="x", padx=12, pady=(0, 8))
+        ttk.Progressbar(progress_frame, maximum=100, variable=progress_var).pack(fill="x", padx=8, pady=(8, 4))
+        ttk.Label(progress_frame, textvariable=status_var, justify="left", anchor="w").pack(fill="x", padx=8, pady=(0, 8))
+
+        btns = ttk.Frame(win)
+        btns.pack(fill="x", padx=12, pady=(0, 12))
+
+        def parse_interval_ms() -> int:
+            try:
+                seconds = float(interval_var.get().strip())
+            except Exception:
+                seconds = 0.8
+            seconds = max(0.05, min(seconds, 3600.0))
+            interval_var.set(str(seconds).rstrip("0").rstrip(".") if seconds != int(seconds) else str(int(seconds)))
+            return int(seconds * 1000)
+
+        def _body_labels_for_lsf(path: Path) -> list[str]:
+            try:
+                scene = analyze_lsf_scene(parse_lsf_file(path))
+                labels = [str(x.label) for x in scene.body_options]
+                return labels if labels else [""]
+            except Exception:
+                # 解析失败也保留一个测试步骤，让正式切换时显示原来的错误提示。
+                return [""]
+
+        def format_test_status(done: int, total: int, current_scene: str = "", current_body: str = "") -> str:
+            total = max(0, int(total))
+            done = max(0, min(int(done), total)) if total else int(done)
+            percent = 100.0 if total <= 0 else done * 100.0 / total
+            if done <= 0:
+                interval_seconds = parse_interval_ms() / 1000.0
+                eta = format_duration(interval_seconds * max(0, total - done))
+            elif done >= total:
+                eta = "00:00"
+            else:
+                elapsed = max(0.0, time.time() - float(state.get("start_time") or time.time()))
+                eta = format_duration((elapsed / done) * (total - done))
+            name_part = ""
+            if current_scene or current_body:
+                name_part = f"｜当前：{current_scene}"
+                if current_body:
+                    name_part += f" / {current_body}"
+            linkage_part = ""
+            if apply_linkage_var.get():
+                labels = self._enabled_linkage_labels()
+                if labels:
+                    linkage_part = "｜联动：" + "、".join(labels)
+            return f"已切换文件数：{done}/{total} ({percent:.1f}%)｜预计剩余时间：{eta}{name_part}{linkage_part}"
+
+        def save_current_automation_settings() -> None:
+            try:
+                interval_seconds = float(interval_var.get().strip())
+            except Exception:
+                interval_seconds = 0.8
+            interval_seconds = max(0.05, min(interval_seconds, 3600.0))
+            self.automation_settings = {
+                "has_run": True,
+                "interval_seconds": interval_seconds,
+                "start_from_current": bool(start_from_current_var.get()),
+                "auto_pick_next_dir": bool(auto_pick_next_dir_var.get()),
+                "apply_linkage": bool(apply_linkage_var.get()),
+            }
+            save_automation_settings(self.automation_settings)
+
+        def build_sequence() -> list[dict[str, object]]:
+            scene_values = [str(v) for v in list(self.scene_combo["values"] or [])]
+            if not scene_values:
+                return []
+
+            scene_start_idx = 0
+            current_body = self.body_var.get()
+            if start_from_current_var.get():
+                try:
+                    scene_start_idx = scene_values.index(self.scene_var.get())
+                except ValueError:
+                    scene_start_idx = 0
+
+            sequence: list[dict[str, object]] = []
+            path_by_name = {p.name: p for p in self.lsf_files}
+            use_linkage = bool(apply_linkage_var.get()) and any(var.get() for var in self.linkage_vars.values())
+            for scene_idx, scene_name in enumerate(scene_values[scene_start_idx:], start=scene_start_idx):
+                path = path_by_name.get(scene_name)
+                if path is None:
+                    continue
+                try:
+                    scene_for_count = analyze_lsf_scene(parse_lsf_file(path))
+                    bodies = [str(x.label) for x in scene_for_count.body_options] or [""]
+                    linkage_steps = self._automation_linkage_step_count_for_scene(scene_for_count) if use_linkage else 1
+                except Exception:
+                    # 解析失败也保留一个测试步骤，让正式切换时显示原来的错误提示。
+                    bodies = [""]
+                    linkage_steps = 1
+
+                body_start_idx = 0
+                if start_from_current_var.get() and scene_idx == scene_start_idx:
+                    try:
+                        body_start_idx = bodies.index(current_body)
+                    except ValueError:
+                        body_start_idx = 0
+
+                if use_linkage:
+                    # 联动模式：衣服/时间端可循环，用来带动已勾选的表情/红晕/特殊/圣光走完一轮。
+                    step_count = max(1, len(bodies), linkage_steps)
+                    for offset in range(step_count):
+                        body_idx = (body_start_idx + offset) % len(bodies)
+                        body_label = bodies[body_idx]
+                        sequence.append({
+                            "scene": scene_name,
+                            "body": body_label,
+                            "scene_index": scene_idx + 1,
+                            "scene_total": len(scene_values),
+                            "body_index": body_idx + 1,
+                            "body_total": len(bodies),
+                            "link_step": offset,
+                            "linkage_enabled": True,
+                        })
+                else:
+                    for body_idx, body_label in enumerate(bodies[body_start_idx:], start=body_start_idx):
+                        sequence.append({
+                            "scene": scene_name,
+                            "body": body_label,
+                            "scene_index": scene_idx + 1,
+                            "scene_total": len(scene_values),
+                            "body_index": body_idx + 1,
+                            "body_total": len(bodies),
+                            "link_step": 0,
+                            "linkage_enabled": False,
+                        })
+            return sequence
+
+        def finish_test() -> None:
+            state["running"] = False
+            state["after_id"] = None
+            total = len(state.get("sequence") or [])
+            done = min(int(state.get("index") or 0), total)
+            progress_var.set(100.0 if total else 0.0)
+            status_var.set(format_test_status(done, total, str(state.get("last_scene") or ""), str(state.get("last_body") or "")) + "｜完成")
+            start_button.state(["!disabled"])
+            stop_button.state(["disabled"])
+            close_button.state(["!disabled"])
+            if auto_pick_next_dir_var.get():
+                win.destroy()
+                self.after(120, self._pick_lsf_dir)
+
+        def stop_test() -> None:
+            state["running"] = False
+            after_id = state.get("after_id")
+            if after_id:
+                try:
+                    win.after_cancel(after_id)
+                except Exception:
+                    pass
+            state["after_id"] = None
+            total = len(state.get("sequence") or [])
+            done = min(int(state.get("index") or 0), total)
+            status_var.set(format_test_status(done, total, str(state.get("last_scene") or ""), str(state.get("last_body") or "")) + "｜已停止")
+            start_button.state(["!disabled"])
+            stop_button.state(["disabled"])
+            close_button.state(["!disabled"])
+
+        def run_next() -> None:
+            if not state.get("running"):
+                return
+            sequence = list(state.get("sequence") or [])
+            total = len(sequence)
+            idx = int(state.get("index") or 0)
+            if idx >= total:
+                finish_test()
+                return
+
+            item = sequence[idx]
+            scene_name = str(item.get("scene", ""))
+            body_label = str(item.get("body", ""))
+            state["last_scene"] = scene_name
+            state["last_body"] = body_label
+
+            # 场景变化时先加载这个 LSF，但不立刻刷新；随后切到指定衣服/时间端并刷新一次。
+            if self.scene_var.get() != scene_name or self.scene is None or self.scene.project.lsf_path.name != scene_name:
+                self.scene_var.set(scene_name)
+                self._load_selected_scene(refresh=False)
+            if body_label:
+                self.body_var.set(body_label)
+            # 自动化测试现在会真正应用“联动设置”：第 1 步保留当前/默认表情，
+            # 从第 2 步开始每次推进已勾选的联动项，避免跳过初始表情。
+            if bool(item.get("linkage_enabled")) and int(item.get("link_step") or 0) > 0:
+                self._advance_enabled_linkage_controls()
+            self.refresh_preview()
+
+            idx += 1
+            state["index"] = idx
+
+            percent = 100.0 if total <= 0 else idx * 100.0 / total
+            progress_var.set(percent)
+            status_var.set(format_test_status(idx, total, scene_name, body_label))
+
+            if idx >= total:
+                finish_test()
+            else:
+                state["after_id"] = win.after(parse_interval_ms(), run_next)
+
+        def start_test() -> None:
+            sequence = build_sequence()
+            if not sequence:
+                messagebox.showinfo("提示", "没有可测试的 LSF / 衣服选项。", parent=win)
+                return
+            parse_interval_ms()
+            save_current_automation_settings()
+            state["sequence"] = sequence
+            state["index"] = 0
+            state["start_time"] = time.time()
+            state["last_scene"] = ""
+            state["last_body"] = ""
+            state["running"] = True
+            progress_var.set(0.0)
+            status_var.set(format_test_status(0, len(sequence)))
+            start_button.state(["disabled"])
+            stop_button.state(["!disabled"])
+            close_button.state(["disabled"])
+            run_next()
+
+        start_button = ttk.Button(btns, text="开始测试", command=start_test)
+        start_button.pack(side="left")
+        stop_button = ttk.Button(btns, text="停止", command=stop_test)
+        stop_button.pack(side="left", padx=(8, 0))
+        stop_button.state(["disabled"])
+        close_button = ttk.Button(btns, text="关闭", command=win.destroy)
+        close_button.pack(side="right")
+        win.protocol("WM_DELETE_WINDOW", lambda: stop_test() or win.destroy())
+        self._place_popup_like_left_panel(win)
+        if auto_start:
+            win.after(120, start_test)
 
 
 class JSONTab(BaseTab):
@@ -1518,7 +2093,17 @@ class JSONTab(BaseTab):
         png_count = count_dir_files(self.png_var.get(), ("*.png",))
         self.stats_var.set(f"当前目录统计：JSON {json_count} 个，PNG {png_count} 个")
 
+    def _clear_current_preview_image(self) -> None:
+        self.current_image = None
+        if hasattr(self, "preview"):
+            self.preview.show_image(None)
+
+    def _release_loaded_resources(self) -> dict[str, object | None]:
+        # 切换目录时只把旧资源从前台摘下，不在主线程立即清理。
+        return self._detach_loaded_resources()
+
     def load_project(self) -> None:
+        old_resources = self._release_loaded_resources()
         try:
             self.json_files = collect_input_files(self.json_input_var.get(), ("*.json",))
             if not self.json_files:
@@ -1533,7 +2118,9 @@ class JSONTab(BaseTab):
             self.scene_combo["values"] = scene_names
             self.scene_var.set(scene_names[0])
             self._load_selected_scene()
+            self._schedule_background_resource_cleanup(old_resources)
         except Exception as exc:
+            self._schedule_background_resource_cleanup(old_resources)
             messagebox.showerror("加载失败", str(exc))
 
     def _load_selected_scene(self) -> None:
@@ -1544,6 +2131,7 @@ class JSONTab(BaseTab):
             path = next((p for p in self.json_files if p.name == selected), None)
             if not path:
                 return
+            self._clear_current_preview_image()
             self.scene = analyze_json_scene(parse_json_project(path))
             self.body_combo["values"] = [x.label for x in self.scene.body_options]
             self.expression_combo["values"] = [x.label for x in self.scene.expression_options]
@@ -1580,6 +2168,7 @@ class JSONTab(BaseTab):
             body if body and body.records is not None else None,
             None if expr and expr.key == "__none__" else expr,
             None if blush and blush.key == "__none__" else blush,
+            runtime_workers=CPU_LOGICAL_THREADS,
         )
         self.current_image = image
         self.preview.show_image(image)
@@ -1588,6 +2177,9 @@ class JSONTab(BaseTab):
             f"画布: {self.scene.project.canvas_width} x {self.scene.project.canvas_height}",
             f"已加载 JSON 数: {len(self.json_files)}",
             f"已索引 PNG 数: {len(self.resolver.by_stem) if self.resolver else 0}",
+            CPU_INFO_TEXT,
+            f"当前默认工作线程: {DEFAULT_THREAD_COUNT}",
+            f"运行时预览 PNG 解码线程: {CPU_LOGICAL_THREADS}",
             f"衣服或者其他: {body.label if body else '(无)'}",
             f"表情: {expr.label if expr else '(无表情)'}",
             f"红晕: {blush.label if blush else '(无红晕)'}",
@@ -1804,7 +2396,7 @@ class JSONTab(BaseTab):
         if not jobs:
             return 0, 0
 
-        max_workers = max(1, min(int(thread_count or 4), 16))
+        max_workers = normalize_thread_count(thread_count)
         filename_lock = threading.Lock()
         reserved_paths: set[str] = set()
         completed = 0
@@ -1948,7 +2540,7 @@ class JSONTab(BaseTab):
             width=6,
         )
         thread_combo.pack(side="left", padx=(8, 8))
-        ttk.Label(thread_row, text="默认 4；可选 2 / 4 / 6 / 8 / 12 / 16").pack(side="left")
+        ttk.Label(thread_row, text=f"{CPU_INFO_TEXT}；默认使用全部逻辑线程").pack(side="left")
 
         target_frame = ttk.LabelFrame(win, text="参与批量的选项")
         target_frame.pack(fill="both", expand=True, padx=12, pady=(0, 8))
