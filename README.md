@@ -2,7 +2,7 @@
  ![image](https://github.com/zeli624233/Haison-Shoujo-Series-CG-Gareki-Viewer-Extractor/blob/main/Logo3.png)
 ## 简介
 
-- 这是一个用于《廃村少女》系列 CG/立绘资源查看与导出的开源项目，支持读取 LSF 与 PNG 资源，组合预览并导出当前组合或批量导出组合图。
+- 这是一个用于小e社《廃村少女》系列 CG/立绘资源查看与导出的开源项目，支持读取 LSF 与 PNG 资源，组合预览并导出当前组合或批量导出组合图。
 
 ## 目前支持
 
