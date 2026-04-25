@@ -1,7 +1,6 @@
 # Haison Shoujo Series CG & Gareki Viewer & Extractor
  
  ![image](https://github.com/zeli624233/Haison-Shoujo-Series-CG-Gareki-Viewer-Extractor/blob/main/Logo.png)
- ![image](https://github.com/zeli624233/Haison-Shoujo-Series-CG-Gareki-Viewer-Extractor/blob/main/%E4%BD%BF%E7%94%A8%E8%AF%B4%E6%98%8E2.png)
 ## 简介
 
 这是一个用于《廃村少女》系列 CG/立绘资源查看与导出的项目，支持读取 LSF 与 PNG 资源，组合预览并导出当前组合或批量导出组合图。
@@ -31,6 +30,9 @@
 - 程序多线程运行支持。
 - 优化了软件的内存使用量，会自动释放空闲内存。
 - 支持自动化测试，快速检查软件对CG，人物立绘的识别是否正确。
+## 使用说明
+ ![image](https://github.com/zeli624233/Haison-Shoujo-Series-CG-Gareki-Viewer-Extractor/blob/main/%E4%BD%BF%E7%94%A8%E8%AF%B4%E6%98%8E2.png)
+  
 
 ## 运行源码版
 
