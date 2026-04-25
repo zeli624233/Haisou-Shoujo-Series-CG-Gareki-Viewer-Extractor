@@ -16,7 +16,6 @@
 - ev
 - gfx/face/adv
 - st
-- 
 ## 主要功能
 
 - LSF + PNG 组合预览
