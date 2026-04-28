@@ -42,6 +42,7 @@
 - 程序多线程运行支持。
 - 优化了软件的内存使用量，会自动释放空闲内存。
 - 支持自动化测试，快速检查软件对CG，人物立绘的识别是否正确。
+- 组合选项新增“一键清空”功能，鼠标指针在该位置，右击可设置清空选项。
 ## 使用说明
  ![image](https://github.com/zeli624233/Haison-Shoujo-Series-CG-Gareki-Viewer-Extractor/blob/main/%E4%BD%BF%E7%94%A8%E8%AF%B4%E6%98%8E2.png)
   
