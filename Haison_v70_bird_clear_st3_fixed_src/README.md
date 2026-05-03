@@ -1,0 +1,3 @@
+# HaisouShoujoViewerExtractor
+
+Windows release build.
